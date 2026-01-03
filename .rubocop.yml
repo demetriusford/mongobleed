@@ -1,2 +1,9 @@
 inherit_gem:
   rubocop-shopify: rubocop.yml
+
+plugins:
+  - rubocop-sorbet
+
+AllCops:
+  NewCops: enable
+  SuggestExtensions: false
