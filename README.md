@@ -6,7 +6,7 @@
 
 ```bash
 $ bundle install
-$ bundle exec mongobleed.rb --host <target> --port 27017
+$ bundle exec ruby mongobleed.rb --host <target> --port 27017
 ```
 
 ## Context
