@@ -17,4 +17,4 @@ Options: `--host`, `--port`, `--min-offset`, `--max-offset`, `--output`
 
 ## Disclaimer
 
-For authorized security testing only. Based on research by Joe Desimone ([@dez_.](https://x.com/dez_))
+For authorized security testing only. Based on research by Joe Desimone ([@dez_](https://x.com/dez_))
