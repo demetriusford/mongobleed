@@ -1,5 +1,2 @@
-require:
-  - rubocop-shopify
-
 inherit_gem:
   rubocop-shopify: rubocop.yml
