@@ -1,0 +1,9 @@
+# Output files
+leaked.bin
+*.bin
+
+# Bundler
+Gemfile.lock
+
+# OS
+.DS_Store
