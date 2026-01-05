@@ -5,11 +5,21 @@
 ## Usage
 
 ```bash
-$ bundle install
-$ bundle exec ruby mongobleed.rb --host 10.0.2.15 --port 27017 --min-offset 20 --max-offset 8192 --output leaked.bin
+$ bundle exec ruby mongobleed.rb --help
+Usage: mongobleed.rb [options]
+        --host HOST                  Target host (default: localhost)
+        --port PORT                  Target port (default: 27017)
+        --min-offset MIN             Min doc length (default: 20)
+        --max-offset MAX             Max doc length (default: 8192)
+        --output FILE                Output file (default: leaked.bin)
+    -h, --help                       Show this help
 ```
 
 ## Output
+
+```bash
+$ bundle exec ruby mongobleed.rb --host 10.0.2.15 --port 27017
+```
 
 ```
 ============================================================
